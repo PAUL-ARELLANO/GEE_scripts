@@ -5,7 +5,7 @@
 // and provides visualizations for the computed NDVI values.
 // The Study Areas are defined by polygons imported from an asset.
 // 
-// Date: Jun 23th, 2025
+// Date: Jun 24th, 2025
 //
 //By: Paul Arellan - Paul Gee 
 // Contact:
@@ -14,12 +14,15 @@
 // GitHub:
 //
 
+// Record start time for performance report
+var startTime = new Date();
+
 // --- 1. SETUP: Import Polygons and Define Study Area ---
 
 // Import your polygons asset. Ensure this path is correct.
 //var polygons = ee.FeatureCollection("projects/paul-gee/assets/Priority2");
 //var polygons = ee.FeatureCollection("projects/paul-gee/assets/Priority_3_WGS84_Arizona_cleaned_north");
-var polygons = ee.FeatureCollection("projects/paul-gee/assets/Priority1_WGS84_Arizona_3_Polygon3");
+var polygons = ee.FeatureCollection("projects/paul-gee/assets/Priority1_WGS84_Arizona_4_2");
 // Define the study area as the union of all polygon geometries.
 var studyArea = polygons.geometry();
 
@@ -53,7 +56,7 @@ print('----------------------------------------------------');
 
 var sentinel2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
   .filterBounds(studyArea) // Filter by the combined study area
-  .filterDate('2023-01-01', '2025-12-31') // Overall date range for your analysis
+  .filterDate('2023-03-01', '2024-09-30') // Overall date range for your analysis
   //.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 80)); // THIS LINE REMAINS COMMENTED OUT for now
 
 // Print the initial collection size (after initial filters).
@@ -124,12 +127,12 @@ if (firstNDVI) {
 
 // --- 4. COMPUTE ANNUAL NDVI COMPOSITES (Spring/Summer, with robust band checks) ---
 
-var years = ee.List.sequence(2023, 2025);
+var years = ee.List.sequence(2023, 2024);
 
 var yearlyNDVI = years.map(function(year) {
   year = ee.Number(year);
   var springSummerStartDate = ee.Date.fromYMD(year, 3, 1); // March 1st
-  var springSummerEndDate = ee.Date.fromYMD(year, 6, 22);   // Jun 22th
+  var springSummerEndDate = ee.Date.fromYMD(year, 6, 17);   // Jun 17st
 
   var collectionForYear = ndviCollection.filterDate(springSummerStartDate, springSummerEndDate).select('NDVI');
   var numImagesInYear = collectionForYear.size();
@@ -226,15 +229,6 @@ if (ndvi2024) {
 } else {
   print('Warning: No 2024 NDVI composite found for visualization.');
 }
-
-var ndvi2025 = yearlyNDVI.filter(ee.Filter.eq('year', 2025)).first();
-if (ndvi2025) {
-  Map.addLayer(ndvi2025, vizParams, 'NDVI 2025 Composite');
-  print('NDVI 2025 Composite image (for properties check):', ndvi2025);
-} else {
-  print('Warning: No 2025 NDVI composite found for visualization.');
-}
-
 
 // --- 6. COMPUTE NDVI TREND ---
 
@@ -449,7 +443,7 @@ var exportNDVI = function(year) {
   }
 };
 
-var yearsList = [2023, 2024, 2025];
+var yearsList = [2023, 2024];
 yearsList.forEach(function(year) {
   exportNDVI(ee.Number(year));
 });
@@ -474,3 +468,33 @@ if (ndviTrend && ndviTrend.bandNames().contains('scale')) {
 } else {
   print('Skipping export for NDVI Trend: Trend image is not valid or "scale" band is missing.');
 }
+
+
+// --- 11. FINAL REPORT ---
+
+// Note: This report is generated on the client-side after all server-side tasks
+// have been submitted. The execution time reflects the time for the client (your browser)
+// to process the script and send tasks to GEE, not the server-side processing time for exports.
+
+print('--- SCRIPT EXECUTION REPORT ---');
+
+var endTime = new Date();
+var durationSeconds = ee.Number((endTime.getTime() - startTime.getTime()) / 1000); // Use ee.Number for server-side operations
+
+print('1. Total Sentinel-2 Images in Collection (after initial filters):', sentinel2.size());
+
+// Calculate number of pixels processed in the final trend image
+var processedPixels = ee.Number(0); // Default to 0
+if (ndviTrend && ndviTrend.bandNames().contains('scale')) {
+  var pixelCountDict = ndviTrend.select('scale').reduceRegion({
+    reducer: ee.Reducer.count(),
+    geometry: studyArea, // Use the defined study area
+    scale: 30, // Use the same scale as your analysis
+    maxPixels: 1e13 // Ensure enough pixels can be counted for large areas
+  });
+  processedPixels = ee.Number(pixelCountDict.get('scale', 0)); // Get the count, use 0 as default if key is not found.
+}
+print('2. Number of Pixels Processed (in final trend image):', processedPixels);
+print('3. Total Script Execution Time (client-side):', durationSeconds.format('%.2f').cat(' seconds')); // Format for display
+print('4. GEE Clusters Used: This metric is not available to users. Earth Engine automatically manages and scales compute resources on the backend.');
+print('---------------------------------');
