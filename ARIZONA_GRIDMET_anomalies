@@ -1,0 +1,104 @@
+// Google Earth Engine Script: Arizona Environmental Anomalies
+// This script computes precipitation, maximum temperature, and evapotranspiration anomalies
+// for the entire state of Arizona, comparing a target period (Spring-Summer of target years)
+// to a long-term baseline (2010-2022).
+
+// --- 1. SETUP: Define Study Area (Arizona) ---
+
+// Import the Arizona polygon asset.
+var arizonaAsset = ee.FeatureCollection("projects/paul-gee/assets/ARIZONA_borders");
+var arizona = arizonaAsset.geometry();
+
+// Center the map on Arizona (adjust zoom if needed)
+Map.centerObject(arizonaAsset, 6);
+Map.addLayer(arizonaAsset, {color: '800080'}, 'Arizona Boundary');
+
+// --- 2. DEFINE PARAMETERS ---
+
+// Define a baseline period for calculating long-term averages.
+var baselineStart = '2010-01-01';
+var baselineEnd = '2022-12-31';
+
+// Define the Spring/Summer window (consistent with NDVI composites)
+var seasonStartMonth = 3;
+var seasonStartDay = 1;
+var seasonEndMonth = 9;
+var seasonEndDay = 30;
+
+// Define target years for analysis
+var targetYears = [2023, 2024];
+
+// --- 3. ANOMALY CALCULATION FUNCTION ---
+
+// Helper function to calculate seasonal anomaly for a given variable
+var calculateAnomaly = function(dataset, band, reducer, year, scale, units, vis_palette) {
+  var collection = ee.ImageCollection(dataset);
+  
+  // Calculate long-term seasonal average
+  var baselineYears = ee.List.sequence(ee.Date(baselineStart).get('year'), ee.Date(baselineEnd).get('year'));
+  var baselineSeasonalCollection = ee.ImageCollection.fromImages(
+    baselineYears.map(function(y) {
+      var startDate = ee.Date.fromYMD(y, seasonStartMonth, seasonStartDay);
+      var endDate = ee.Date.fromYMD(y, seasonEndMonth, seasonEndDay);
+      var seasonalImage = collection.filterDate(startDate, endDate).select(band).reduce(reducer);
+      return seasonalImage.set('year', y);
+    })
+  );
+  var longTermMean = baselineSeasonalCollection.mean();
+
+  // Calculate the value for the target year
+  var targetStartDate = ee.Date.fromYMD(year, seasonStartMonth, seasonStartDay);
+  var targetEndDate = ee.Date.fromYMD(year, seasonEndMonth, seasonEndDay);
+  var targetYearValue = collection.filterDate(targetStartDate, targetEndDate).select(band).reduce(reducer);
+  
+  // Calculate anomaly (current year - long-term mean)
+  var anomaly = targetYearValue.subtract(longTermMean).rename('anomaly');
+  
+  // Visualization parameters
+  var visParams = {
+    min: -scale, 
+    max: scale, 
+    palette: vis_palette
+  };
+  Map.addLayer(anomaly.clip(arizona), visParams, band + ' Anomaly ' + year + ' (' + units + ')');
+  
+  return anomaly;
+};
+
+// Helper function to export anomaly images
+var exportAnomalyImage = function(image, bandName, year, units) {
+  var imageWithNoData = image.unmask(-9999); // Set NoData value
+  Export.image.toDrive({
+    image: imageWithNoData,
+    description: bandName + '_Anomaly_' + year + '_' + units,
+    fileNamePrefix: bandName + '_Anomaly_' + year + '_' + units,
+    region: arizona, // Use the study area geometry
+    scale: 4000, // GRIDMET's approximate scale
+    fileFormat: 'GEO_TIFF',
+    formatOptions: {
+      cloudOptimized: true
+    },
+    maxPixels: 1e13
+  });
+  print('Export task submitted for ' + bandName + ' Anomaly ' + year);
+};
+
+// --- 4. CALCULATE AND EXPORT ANOMALIES ---
+
+// Process each target year
+targetYears.forEach(function(year) {
+  // Precipitation Anomaly (total precipitation)
+  // Brown = Drier than avg, Blue = Wetter than avg
+  var precipAnomaly = calculateAnomaly('IDAHO_EPSCOR/GRIDMET', 'pr', ee.Reducer.sum(), year, 100, 'mm', ['#8B4513', 'white', '#0066FF']);
+  exportAnomalyImage(precipAnomaly, 'Precipitation', year, 'mm');
+
+  // Max Temperature Anomaly (mean of max temp)
+  // Blue = Cooler than avg, Red = Hotter than avg
+  var tmmxAnomaly = calculateAnomaly('IDAHO_EPSCOR/GRIDMET', 'tmmx', ee.Reducer.mean(), year, 3, '°C', ['blue', 'white', 'red']);
+  exportAnomalyImage(tmmxAnomaly, 'MaxTemperature', year, 'C');
+  
+  // Reference Evapotranspiration Anomaly (total ET)
+  // Green = Lower ET than avg, Orange = Higher ET than avg
+  var etrAnomaly = calculateAnomaly('IDAHO_EPSCOR/GRIDMET', 'etr', ee.Reducer.sum(), year, 80, 'mm', ['green', 'white', '#FF4500']);
+  exportAnomalyImage(etrAnomaly, 'Evapotranspiration', year, 'mm');
+});
