@@ -1,0 +1,162 @@
+// -------------------------------------------------------------------------------------
+// GEE Script: Seasonal Total Evaporation Anomaly for Arizona
+//
+// Summary:
+// This Google Earth Engine script calculates, visualizes, and exports the seasonal
+// total evaporation anomaly for the state of Arizona for specified years.
+//
+// Data Source:
+// It utilizes the monthly `total_evaporation` band from the
+// `ECMWF/ERA5_LAND/MONTHLY` dataset, which represents the sum of evaporation from
+// the soil surface, canopy, and transpiration (actual evapotranspiration).
+//
+// Methodology:
+// 1. Baseline Calculation: It establishes a long-term historical average (mean)
+//    for total evaporation during a defined seasonal window (e.g., March-September)
+//    over a multi-decade baseline period (1981-2022).
+// 2. Target Year Calculation: For each specified analysis year (e.g., 2022, 2023),
+//    it calculates the total evaporation for the same seasonal window.
+// 3. Anomaly Computation: The anomaly is calculated by subtracting the long-term
+//    baseline mean from the target year's seasonal total. All values are
+//    converted from meters to millimeters.
+// 4. Visualization: The resulting anomaly is displayed on the map. The color
+//    palette is intentionally reversed: red indicates higher-than-average
+//    evaporation (suggesting drier conditions), while blue indicates
+//    lower-than-average evaporation (suggesting wetter conditions).
+// 5. Export: The script generates and exports each valid anomaly raster as a
+//    GeoTIFF file to a designated folder in the user's Google Drive. It includes
+//    a robustness check to prevent export tasks for years with incomplete data.
+// -------------------------------------------------------------------------------------
+// Uncommnet to either apply precipitation or evaporation
+//
+//
+// --- 1. SETUP: Define Study Area (Arizona) ---
+
+// Use a public asset for the Arizona boundary to ensure portability.
+var arizona = ee.FeatureCollection("TIGER/2018/States")
+                  .filter(ee.Filter.eq('NAME', 'Arizona')).geometry();
+
+// Center the map on Arizona (adjust zoom if needed)
+Map.centerObject(arizona, 6);
+
+// --- 2. DEFINE PARAMETERS ---
+
+// Define a baseline period for calculating long-term averages.
+var baselineStart = '1981-01-01'; // ERA5-Land data starts in 1950, using a reasonable baseline
+var baselineEnd = '2022-12-31';
+
+// Define the analysis years
+var analysisYears = [2022, 2023]; // Use years with guaranteed complete data.
+
+// Define the Spring/Summer window (consistent with NDVI composites)
+var seasonStartMonth = 3;
+var seasonStartDay = 1;
+var seasonEndMonth = 9;
+var seasonEndDay = 30;
+
+// --- 3. ANOMALY CALCULATION FUNCTION ---
+// Helper function to calculate seasonal precipitation anomaly
+//var calculatePrecipAnomaly = function(year) {
+  // Helper function to calculate seasonal potential evaporation sum anomaly
+var calculateEvaporationAnomaly = function(year) {
+    // Using ERA5-Land Monthly Averaged data
+    var collection = ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY');
+//    var bandName = 'total_precipitation';
+      var bandName = 'total_evaporation'; // Changed band to potential evaporation sum
+
+    // --- 1. Calculate long-term seasonal average (Baseline Mean) ---
+    var baselineYears = ee.List.sequence(ee.Date(baselineStart).get('year'), ee.Date(baselineEnd).get('year'));
+    var baselineSeasonalCollection = ee.ImageCollection.fromImages(
+      baselineYears.map(function(y) {
+        var startDate = ee.Date.fromYMD(y, seasonStartMonth, seasonStartDay);
+        var endDate = ee.Date.fromYMD(y, seasonEndMonth, seasonEndDay);
+        // Sum all monthly images within the season for a given year
+        // Multiply by 1000 to convert from meters to millimeters (mm).
+        var seasonalImage = collection.filterDate(startDate, endDate).select(bandName).sum().multiply(1000);
+        return seasonalImage.set('year', y);
+      })
+    );
+
+    // --- 2. Calculate the total for the target year ---
+    var targetStartDate = ee.Date.fromYMD(year, seasonStartMonth, seasonStartDay);
+    var targetEndDate = ee.Date.fromYMD(year, seasonEndMonth, seasonEndDay);
+    var targetYearCollection = collection.filterDate(targetStartDate, targetEndDate).select(bandName);
+
+    // --- 3. Robustness Check and Anomaly Calculation ---
+    // Check if we have data for both the baseline and the target year.
+    var baselineHasImages = baselineSeasonalCollection.size().gt(0);
+    var targetHasImages = targetYearCollection.size().gt(0);
+
+    // Use ee.Algorithms.If for conditional server-side logic.
+    var anomaly = ee.Algorithms.If(
+      // Condition: Do we have data in both collections?
+      baselineHasImages.and(targetHasImages),
+      // True: Calculate the anomaly
+      targetYearCollection.sum().multiply(1000) // Convert to mm
+        .subtract(baselineSeasonalCollection.mean())
+        .rename('anomaly'),
+      // False: Return a masked image and print a message.
+      ee.Image().rename('anomaly').mask(ee.Image(0)).set(
+        'error_message', ee.String('No data found for year ').cat(ee.Number(year).format())
+      )
+    );
+
+    // Cast the result from ee.Algorithms.If to an Image
+    anomaly = ee.Image(anomaly);
+
+    // --- 4. Visualization ---
+    var visParams = {
+//      min: -200, // Now in mm
+//      max: 200,  // mm
+//      palette: ['red', 'white', 'blue'] // Red = Drier, White = Normal, Blue = Wetter
+      min: -100, // Adjusted min/max for potential evaporation anomaly (mm)
+      max: 100,  // Adjusted min/max for potential evaporation anomaly (mm)
+      // Reversed palette: Blue = lower evaporation (wetter), Red = higher evaporation (drier)
+      palette: ['blue', 'white', 'red']
+
+
+    };
+//    Map.addLayer(anomaly.clip(arizona), visParams, 'Precip Anomaly ' + year + ' (mm)');
+    Map.addLayer(anomaly.clip(arizona), visParams, 'Potential Evaporation Anomaly ' + year + ' (mm)'); // Updated layer name    
+
+
+    // --- 5. Export the anomaly image to Google Drive ---
+    // Only export if the anomaly image is not fully masked (i.e., data was found).
+    // We check if it has bands AND if there's at least one non-masked pixel.
+    var exportCondition = anomaly.bandNames().size().gt(0).and(
+      ee.Number(anomaly.reduceRegion(ee.Reducer.count(), arizona, 10000).get('anomaly')).gt(0)
+    );
+
+    ee.Algorithms.If(exportCondition,
+
+
+      true, // If it has bands and some data, proceed with export
+      false // Otherwise, skip export
+    );
+
+    ee.Algorithms.If(exportCondition,
+      Export.image.toDrive({
+        image: anomaly.clip(arizona), // Clip to Arizona for export
+//        description: 'Precip_Anomaly_' + year,
+//        folder: 'GEE_Precip_Anomalies', // This folder will be created in your Google Drive
+//        fileNamePrefix: 'Precip_Anomaly_' + year,
+        description: 'Total_Evaporation_Anomaly_' + year, // Updated export description
+        folder: 'GEE_Total_Anomalies', // New folder for evaporation exports
+        fileNamePrefix: 'Total_Evaporation_Anomaly_' + year, // Updated file name prefix
+        scale: 10000, // ERA5-Land resolution is approx 10km
+        region: arizona,
+        crs: 'EPSG:4326', // WGS84 geographic coordinate system
+        maxPixels: 1e13 // Increase if you encounter "User memory limit exceeded"
+      }),
+      null // Do nothing if export condition is false
+    );
+
+    return anomaly;
+};
+
+// --- 4. RUN ANALYSIS ---
+// Map the anomaly calculation function over the list of analysis years.
+//var results = analysisYears.map(calculatePrecipAnomaly);
+var results = analysisYears.map(calculateEvaporationAnomaly); // Call the new function name
+// Optional: Print the results to inspect any error messages.
+print('Analysis Results (check for error messages):', results);
