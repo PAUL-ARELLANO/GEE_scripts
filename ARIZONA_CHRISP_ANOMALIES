@@ -1,0 +1,115 @@
+// Google Earth Engine Script: Arizona Precipitation Anomalies (CHIRPS)
+// This script computes precipitation anomalies for the state of Arizona,
+// comparing a target period (Spring-Summer of target years) to a long-term baseline.
+//
+// It uses the CHIRPS dataset as a proxy for drought stress, where lower precipitation
+// indicates higher potential stress.
+
+// --- 1. SETUP: Define Study Area (Arizona) ---
+
+// Define Arizona's boundaries. You might need to adjust these coordinates for accuracy.
+// Import the Arizona polygon asset.
+var arizonaAsset = ee.FeatureCollection("projects/paul-gee/assets/ARIZONA_borders");
+var arizona = arizonaAsset.geometry();
+
+// Center the map on Arizona (adjust zoom if needed)
+Map.centerObject(arizona, 6);
+
+// --- 2. DEFINE PARAMETERS ---
+
+// Define a baseline period for calculating long-term averages.
+var baselineStart = '1981-01-01'; // CHIRPS data starts in 1981
+var baselineEnd = '2022-12-31';
+
+// Define the analysis years
+var analysisYears = [2023, 2024];
+
+// Define the Spring/Summer window (consistent with NDVI composites)
+var seasonStartMonth = 3;
+var seasonStartDay = 1;
+var seasonEndMonth = 9;
+var seasonEndDay = 30;
+
+// --- 3. ANOMALY CALCULATION FUNCTION ---
+
+// Helper function to calculate seasonal precipitation anomaly
+var calculatePrecipAnomaly = function(year) {
+  var collection = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY');
+
+  // Calculate long-term seasonal average
+  var baselineYears = ee.List.sequence(ee.Date(baselineStart).get('year'), ee.Date(baselineEnd).get('year'));
+  var baselineSeasonalCollection = ee.ImageCollection.fromImages(
+    baselineYears.map(function(y) {
+      var startDate = ee.Date.fromYMD(y, seasonStartMonth, seasonStartDay);
+      var endDate = ee.Date.fromYMD(y, seasonEndMonth, seasonEndDay);
+      var seasonalImage = collection.filterDate(startDate, endDate).select('precipitation').sum();
+      return seasonalImage.set('year', y);
+    })
+  );
+  var longTermMean = baselineSeasonalCollection.mean();
+
+  // Calculate the value for the target year
+  var targetStartDate = ee.Date.fromYMD(year, seasonStartMonth, seasonStartDay);
+  var targetEndDate = ee.Date.fromYMD(year, seasonEndMonth, seasonEndDay);
+  var targetYearValue = collection.filterDate(targetStartDate, targetEndDate).select('precipitation').sum();
+
+  // Calculate anomaly (current year - long-term mean)
+  var anomaly = targetYearValue.subtract(longTermMean).rename('anomaly');
+
+  // Visualization parameters
+  var visParams = {
+    min: -200, // Adjust min/max based on typical precip anomaly range
+    max: 200,
+    palette: ['red', 'white', 'blue'] // Red = Drier, Blue = Wetter
+  };
+  Map.addLayer(anomaly.clip(arizona), visParams, 'Precip Anomaly ' + year + ' (mm)');
+
+  return anomaly;
+};
+
+// Helper function to export anomaly images
+var exportAnomalyImage = function(image, year) {
+  var imageWithNoData = image.unmask(-9999); // Set NoData value
+  Export.image.toDrive({
+    image: imageWithNoData,
+    description: 'Precip_Anomaly_' + year + '_mm',
+    fileNamePrefix: 'Precip_Anomaly_' + year + '_mm',
+    region: arizona, // Use the study area geometry
+    scale: 5500, // CHIRPS approximate scale (0.05 degrees ~ 5.5km)
+    fileFormat: 'GEO_TIFF',
+    formatOptions: {
+      cloudOptimized: true
+    },
+    maxPixels: 1e13
+  });
+  print('Export task submitted for Precipitation Anomaly ' + year);
+};
+
+// --- 4. CALCULATE AND EXPORT ANOMALIES ---
+
+// Process each target year
+analysisYears.forEach(function(year) {
+  print('Processing Precipitation anomalies for year: ' + year);
+
+  // Calculate precipitation anomaly
+  var precipAnomaly = calculatePrecipAnomaly(year);
+  exportAnomalyImage(precipAnomaly, year);
+});
+
+print('Precipitation anomaly calculation and export tasks submitted.');
+
+// --- 5. ADD A LEGEND (Optional) ---
+
+// Add a legend to the map (customize as needed)
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+// Create legend title
+var legendTitle = ui.Label({
+ value: 'Precipitation Anomaly (mm)',
+ style: {fontWeight: 'bold', fontSize: '14px', margin: '0 0 4px 0', padding: '0'}
+});
